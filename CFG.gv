@@ -1,0 +1,21 @@
+// comment
+digraph CFG {
+	0 [label="5:x_ == 1"]
+	1 [label="6:y_ == 2"]
+	0 -> 1
+	2 [label="7:z_ == 0"]
+	1 -> 2
+	3 [label="8:y > z"]
+	2 -> 3 [label="to-assume"]
+	5 [label="11:x_ == x + 1"]
+	4 -> 5
+	5 -> 4 [label="while end"]
+	4 [label="9:x < y"]
+	3 -> 4 [label="to while"]
+	6 [label="13:x >= z"]
+	4 -> 6 [label="to-assert"]
+	7 [label=SAT]
+	8 [label=UNSAT]
+	6 -> 7 [label="assert sat"]
+	6 -> 8 [label="assert unsat"]
+}
