@@ -57,7 +57,8 @@ def move_item(var, formula):
                     r1 = create_node(node_type=PLUS, args=(rFormula, lsub[1]))
                     r2 = create_node(node_type=formula.node_type(), args=(lsub[0], r1))
                     return move_item(var, r2)
-                pass
+            elif op == TIMES:
+                return formula
     else:           # 变量在右边怎么办
         rsub = rFormula.args()
         IsNull = True if len(rsub) == 0 else False
@@ -89,6 +90,8 @@ def move_item(var, formula):
                     r1 = create_node(node_type=PLUS, args=(lFormula, rsub[1]))
                     r2 = create_node(node_type=formula.node_type(), args=(r1, rsub[0]))
                     return move_item(var, r2)
+            elif op == TIMES:
+                return formula
 
 #eliminate a variables from a set of formulas
 def eliminate_one(var, formulas):
@@ -107,7 +110,7 @@ def eliminate_one(var, formulas):
             vs=formulas[j].get_free_variables()
             if var not in vs:
                 continue
-            formulas[j]=substitute(formulas[j],{var : formula.arg(1)})
+            formulas[j] = formulas[j].substitute({var : formula.arg(1)}).simplify()
         return
 
     #not a equation including var

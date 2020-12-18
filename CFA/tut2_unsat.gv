@@ -1,0 +1,23 @@
+// comment
+digraph CFA {
+	6 [label="6:i_==0"]
+	7 [label="7:x_==0"]
+	6 -> 7 [label=""]
+	8 [label="8:y_==0"]
+	7 -> 8 [label=""]
+	9 [label="9:ctr_==0"]
+	8 -> 9 [label=""]
+	11 [label="11:x_ == ctr"]
+	9 -> 11 [label=""]
+	12 [label="12:y_ == x"]
+	11 -> 12 [label=""]
+	13 [label="13:y_ == x + 1"]
+	12 -> 13 [label=""]
+	16 [label="16:y == i + 1"]
+	-1 [label="-1:SAT"]
+	-2 [label="-2:UNSAT"]
+	16 -> -1 [label="assert-sat"]
+	16 -> -2 [label="assert-unsat"]
+	14 [label="14:ctr_ == i"]
+	13 -> 14 [label="assign-if"]
+}

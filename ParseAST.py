@@ -1,5 +1,6 @@
 from graphviz import Digraph
 import copy
+import datetime
 
 from pysmt.shortcuts import *
 from pysmt.typing import INT
@@ -10,19 +11,19 @@ from clang.cindex import Config  #配置
 from clang.cindex import CursorKind  #索引结点的类别
 from clang.cindex import TypeKind    #节点的语义类别
 
-
 libclangPath = r'./lib/libclang.dll'
-# file_path = r"./test/TestCFG.c" # 文件路径
-# file_path = r"./test/TestWhile.c" # 文件路径
-file_path = r"./test/While.c" # 文件路径
-AST_root_node = None # 根节点
-AssumeFlag = False
-g = Digraph(name='CFG', comment="comment", format='png')
+# filename = r"whileif.c"
+# filename = r"Branch_sat.c"
+filename = r"Loop_sat.c"
+# filename = r"Loop_sat.c"
+directory = r"./TestFiles/"     # 测试文件路径
 
+AST_root_node = None # 根节点
 varsPool = []   # 初始只有位置谓词
-Trans = []
-Nodes = []
-AssumeLoc = -1  # assume function location
+Trans = []      # 文本类型转化集
+Nodes = dict()      # 状态集
+
+g = Digraph(name='CFA', comment="comment", format='png')    # graph object
 
 # 配置lib,参数是传入libclang.dll路径
 def configLibClang(libclangPath):
@@ -35,176 +36,198 @@ def configLibClang(libclangPath):
         print("install path")
 
 # 生成AST根节点,参数是 *.c file
-def getRootNode(file_path):
+def getRootNode(directory = directory, filename = filename):
     index = Index.create() # 创建AST索引
-
-    tu = index.parse(file_path)
+    tu = index.parse(directory + filename)  # tu:=TranslationUnit
     AST_root_node= tu.cursor  #cursor根节点
-    print(AST_root_node)    # 有输出表示读取文件成功
+    if AST_root_node is not None:
+        print("file: " + filename + " parse succeed")    # 有输出表示读取文件成功
+    else:
+        print("Error! file"+ filename + "parse error")
+        exit(0)
     return AST_root_node
 
 # 前序遍历函数 cursor is root node
 def preorder_travers_AST(cursor):
     for cur in cursor.get_children():
-        # do something
-        # print("kind:", cur.kind," \tcur.spelling:", cur.spelling)
-        # solve(cur)  # 解析主函数
         if cur.kind == CursorKind.FUNCTION_DECL:
-            print(cur.spelling)
             parseFunctionDecl(cur)
         preorder_travers_AST(cur)
 
 class Node(object):
     id = 0 # static class variable
-    def __init__(self, name, line, formula, changed):
-        self.name = name
-        self.ID = str(Node.id)
+    '''
+    每个结点有名字，有唯一ID，有自己的公式，公式如果是逻辑判断，changed就是不改变。
+    changed是记录变量被修改，下次转化时候方便一些
+    '''
+    def __init__(self, line, formula, isCondition = False, toNodes = []):
         self.line = str(line)
-        self.formula = formula
-        self.changed = changed
+        self.formula = formula  # []
+        self.name = self.getName()   # Label
+        self.isCondition = isCondition  # 判断是否是条件
+        self.changed = self.getChanged() # line : formula
+        self.toNodes = toNodes
+        self.ID = Node.id
         Node.id += 1
+    
+    def getName(self):
+        name = self.line + ":" + "".join(self.formula)
+        if self.line == "-1" or self.line == "-2":
+            self.formula = [''] 
+        return name
+
+    def getChanged(self):
+        if self.isCondition:
+            return ''
+        else:
+            return self.formula[0]
+
+class Transiton(object):
+    id = 0
+    def __init__(self, fromNode, toNode, revered = False):
+        self.ID = str(Transiton.id)
+        self.fromNode = fromNode
+        self.toNode = toNode
+        self.revered = revered
+        self.formulas = self.getFormulas()
+        self.z3Formula = self.z3Formula()
+        Transiton.id += 1
+
+    def getFormulas(self):
+        f1 = copy.deepcopy(self.fromNode.formula)
+        f2 = unChanged([self.fromNode.changed])
+        if self.fromNode.isCondition:
+            if self.revered:
+                return [reveredFormula(f1)] + f2
+            else:
+                return [f1] + f2
+        else:
+            f1[0] = f1[0] + "_"
+            return [f1] + f2
+    
+    def z3Formula(self):
+        z3Formula = []
+        tmpForumula = copy.deepcopy(self.formulas)
+        for formula in tmpForumula + [["pc","=",self.fromNode.line]] + [["pc_","=",self.toNode.line]]:
+            for index in range(len(formula)):
+                if isDigit(formula[index]):
+                    formula[index] = "Int(" + formula[index].strip() + ")"
+            if formula[1] == "=":
+                exec("z3Formula.append(Equals({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "!=":
+                exec("z3Formula.append(NotEquals({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "<=":
+                exec("z3Formula.append(LE({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "<":
+                exec("z3Formula.append(LT({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == ">=":
+                exec("z3Formula.append(GE({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == ">":
+                exec("z3Formula.append(GT({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+        return z3Formula
         pass
 
 def parseFunctionDecl(FunctionDecl):
-    for compound in FunctionDecl.get_children():
-        traversCompoundStmt(compound)
+    for FunctionCompound in FunctionDecl.get_children():
+        traversFuncCompoundStmt(FunctionCompound)
     pass
 
 # Compound结点
-def traversCompoundStmt(CompoundStmt):
-    global AssumeLoc
-    global AssumeFlag
+def traversFuncCompoundStmt(CompoundStmt):
     CompoundStmtNodes = []
-    ifEndNode = None
-    elseEndNode = None
+    ThenEndNodes = []
+    ElseEndNodes = []
     gNode = None
+    '''
+    simple - if
+    simple - while
+    '''
     for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
-            gNode, ifEndNode, elseEndNode = traversIfStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="to if")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            CompoundStmtNodes.append(gNode)                        
+            gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-if")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-if")
+
+            if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
+                g.edge(CompoundStmtNodes[-1].ID, gNode.line, label="assign-if")
+                Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+
+                
+            ThenEndNodes = ThenEndNodes_
+            ElseEndNodes = ElseEndNodes_               
+
         if node.kind == CursorKind.WHILE_STMT:
-            cur = len(Trans)
             gNode = traversWhileStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="to while")
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
+            g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
+
+            if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
+                g.edge(CompoundStmtNodes[-1].line, gNode.line, label="assign-while")
+                Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
-            if AssumeFlag:
-                Trans[-1], Trans[cur] = Trans[cur], Trans[-1]
-                AssumeFlag = False
+
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
+            # g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
+            
+            if len(ThenEndNodes + ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
+        
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")           
+            
+            if len(ThenEndNodes+ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
+
         if node.kind == CursorKind.RETURN_STMT:
-            satNode = getReturnNode("SAT", -1)
-            unsatNode = getReturnNode("UNSAT", -2)
-            g.node(name = satNode.ID, label = satNode.name)
-            g.node(name = unsatNode.ID, label = unsatNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, satNode.ID, "assert sat")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + satNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([satNode.changed, CompoundStmtNodes[-1].changed]))
-                g.edge(CompoundStmtNodes[-1].ID, unsatNode.ID, "assert unsat")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + unsatNode.line + ", " + reveredFormula(CompoundStmtNodes[-1].formula) + unChanged([unsatNode.changed, CompoundStmtNodes[-2].changed]))
-            else:
-                print("Error No assert function")
-                return
+            return
         if node.kind == CursorKind.CALL_EXPR:
             if node.spelling == "sassert":
                 gNode = parseAssertStmt(node)
-                g.node(name=gNode.ID, label=gNode.name)
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, "if-assert")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([ifEndNode.changed, gNode.changed]))
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, "else-assert")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([elseEndNode.changed, gNode.changed]))
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID, "to-assert")
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([CompoundStmtNodes[-1].changed, gNode.changed]))
+                
+                linkEndNodes2gNode(ThenEndNodes, gNode, "then-assert")
+                linkEndNodes2gNode(ElseEndNodes, gNode, "else-assert")   
+
+                if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="to-assert")
+                    Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+
+                ThenEndNodes = []
+                ElseEndNodes = []                
                 CompoundStmtNodes.append(gNode)
-            if node.spelling == "assume":
-                AssumeFlag = True
-                gNode = parseAssumeStmt(node)
-                g.node(name=gNode.ID, label=gNode.name)
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, "if-assume")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([ifEndNode.changed, gNode.changed]))
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, "else-assume")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([elseEndNode.changed, gNode.changed]))
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID, "to-assume")
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([CompoundStmtNodes[-1].changed, gNode.changed]))
-                AssumeLoc = len(Trans)
-                CompoundStmtNodes.append(gNode)
-
-    pass
-
-# 赋值
-def parseEvaluationStmt(BinaryOperator):
-    formula, line, changed = parseOperator2Formula(BinaryOperator)
-    node = Node(name = line + ":" + formula, line = line, formula = formula, changed = changed)
-    Nodes.append(copy.deepcopy(node))
-    return node
-    pass
-
-# 声明
-def parseDeclStmt(DeclStmt):
-    Type, formula, line, changed = parseDecl2Formula(DeclStmt)
-    node = Node(name = line + ":" + formula, line = line, formula = formula, changed = changed)
-    Nodes.append(copy.deepcopy(node))
-    return node
-    pass
 
 # IfStmt结点
 def traversIfStmt(IfStmt):
-    CompoundStmt = []
     conditionNode = None
-    ifEndNode = None
-    elseEndNode = None
+    ThenEndNodes = []
+    ElseEndNodes = []
+    CompoundStmt = []
     for node in IfStmt.get_children():
         if node.kind == CursorKind.BINARY_OPERATOR: # if condition
             conditionNode = parseCondtionStmt(node)
@@ -213,160 +236,121 @@ def traversIfStmt(IfStmt):
     if len(CompoundStmt) != 2:
         print("Error: Code not formalized! IF-Then-Else")
         return
-    ifEndNode = traversIfCompound(CompoundStmt[0], conditionNode)
-    conditionNode.formula = reveredFormula(conditionNode.formula)
-    elseEndNode = traversElseCompound(CompoundStmt[1], conditionNode)
-    return conditionNode, ifEndNode, elseEndNode
-    pass
+    ThenEndNodes = traversIfCompound(CompoundStmt[0], conditionNode)
+    
+    reveredformula = reveredFormula(conditionNode.formula.copy())
+    line = conditionNode.line
+    reveredNode = Node(line, reveredformula, True)
+    Nodes[reveredNode.ID] = copy.copy(reveredNode)
 
-# IfStmt结点 IfBody块
-def traversIfCompound(IfCompoundStmt, conditionNode):
+    ElseEndNodes = traversIfCompound(CompoundStmt[1], reveredNode)
+
+    return conditionNode, ThenEndNodes, ElseEndNodes
+
+# IfStmt结点 Then块和Else块都是一样的
+def traversIfCompound(CompoundStmt, conditionNode):
     CompoundStmtNodes = []
+    ThenEndNodes = []
+    ElseEndNodes = []
     gNode = None
-    ifEndNode = None
-    elseEndNode = None
-    for node in IfCompoundStmt.get_children():
+    for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
-            gNode, ifEndNode, elseEndNode = traversIfStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="to if condition")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="if-if")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)
+            gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-if")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-if")
+
+            if len(ThenEndNodes + ElseEndNodes) == 0 :
+                if len(CompoundStmtNodes) == 0 :
+                    g.edge(conditionNode.line, gNode.line, label="if-if")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+                else:
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="assign-if")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+            
+            ThenEndNodes = ThenEndNodes_
+            ElseEndNodes = ElseEndNodes_                
+
         if node.kind == CursorKind.WHILE_STMT:
             gNode = traversWhileStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="if-while")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="if-while")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
+
+            if len(ThenEndNodes + ElseEndNodes) == 0 :
+                if len(CompoundStmtNodes) == 0 :
+                    g.edge(conditionNode.line, gNode.line, label="if-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+                else:
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="if-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []            
             CompoundStmtNodes.append(gNode)
+
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
+            # g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
+            
+            if len(ThenEndNodes+ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
                 else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
+                    g.edge(conditionNode.line, gNode.line, label="if-decl")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
+        
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
+            # g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")            
+            
+            if len(ThenEndNodes+ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
                 else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
+                    g.edge(conditionNode.line, gNode.line, label="if-assign")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
+
         if node.kind == CursorKind.RETURN_STMT:
-            gNode = getReturnNode()
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="if-end")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="if-end")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-                return gNode
-    return CompoundStmtNodes[-1]
-    pass
+            return
+        if node.kind == CursorKind.CALL_EXPR:
+            if node.spelling == "sassert":
+                gNode = parseAssertStmt(node)
 
-# IfStmt结点 ElseBody块
-def traversElseCompound(ElseCompoundStmt, conditionNode):
-    CompoundStmtNodes = []
-    gNode = None
-    ifEndNode = None
-    elseEndNode = None
-    for node in ElseCompoundStmt.get_children():
-        if node.kind == CursorKind.IF_STMT:
-            gNode = traversIfStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="else-if")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="else-if")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)                
-        if node.kind == CursorKind.WHILE_STMT:
-            gNode = traversWhileStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="else-while")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="else-while")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)
-        if node.kind == CursorKind.DECL_STMT:
-            gNode = parseDeclStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None                    
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)
-        if node.kind == CursorKind.BINARY_OPERATOR:
-            gNode = parseEvaluationStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None 
-                else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)
-    if len(CompoundStmtNodes) == 0:
-        return None
+                linkEndNodes2gNode(ThenEndNodes, gNode, "then-assert")
+                linkEndNodes2gNode(ElseEndNodes, gNode, "else-assert")   
+
+                if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="to-assert")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+                ThenEndNodes = []
+                ElseEndNodes = []
+                CompoundStmtNodes.append(gNode)
+    if len(ThenEndNodes + ElseEndNodes) > 0:
+        return ThenEndNodes + ElseEndNodes
+    if len(CompoundStmtNodes) > 0:
+        return [CompoundStmtNodes[-1]]
     else:
-        return CompoundStmtNodes[-1]
-    pass
+        return [conditionNode]
 
 # WhileStmt结点
 def traversWhileStmt(WhileStmt):
@@ -376,170 +360,227 @@ def traversWhileStmt(WhileStmt):
             conditionNode = parseCondtionStmt(node)
         if node.kind == CursorKind.COMPOUND_STMT:
             traversWhileBody(node, conditionNode)
-    conditionNode.formula = reveredFormula(conditionNode.formula)
     return conditionNode
 
 #WhileBody块
 def traversWhileBody(CompoundStmt, conditionNode):
     CompoundStmtNodes = []
+    ThenEndNodes = []
+    ElseEndNodes = []
     gNode = None
-    ifEndNode = None
-    elseEndNode = None
     for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
-            gNode, ifEndNode, elseEndNode = traversIfStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="while-if")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="while-if")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
-            CompoundStmtNodes.append(gNode)
+            gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
+
+            if len(ThenEndNodes + ElseEndNodes) == 0 :
+                if len(CompoundStmtNodes) == 0 :
+                    g.edge(conditionNode.line, gNode.line, label="while-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+                else:
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="assign-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = ThenEndNodes_
+            ElseEndNodes = ElseEndNodes_               
+
         if node.kind == CursorKind.WHILE_STMT:
             gNode = traversWhileStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                g.edge(CompoundStmtNodes[-1].ID, gNode.ID, label="while-while")
-                Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID, label="while-while")
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
+            # g.node(name=gNode.line, label=gNode.name)
+
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
+
+            if len(ThenEndNodes + ElseEndNodes) == 0 :
+                if len(CompoundStmtNodes) == 0 :
+                    g.edge(conditionNode.line, gNode.line, label="if-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+                else:
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="while-while")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+            ThenEndNodes = []
+            ElseEndNodes = []            
             CompoundStmtNodes.append(gNode)
+
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
+            # g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
+            
+            if len(ThenEndNodes+ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
                 else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([gNode.changed, conditionNode.changed]))
+                    g.edge(conditionNode.line, gNode.line, label="while-decl")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
+
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            g.node(name=gNode.ID, label=gNode.name)
-            if len(CompoundStmtNodes) > 0:
-                if ifEndNode is not None:
-                    g.edge(ifEndNode.ID, gNode.ID, label="if-end")
-                    Trans.append("pc == " + ifEndNode.line + ", pc_ == " + gNode.line + ", " + ifEndNode.formula + unChanged([gNode.changed, ifEndNode.changed]))
-                    ifEndNode = None
-                if elseEndNode is not None:
-                    g.edge(elseEndNode.ID, gNode.ID, label="else-end")
-                    Trans.append("pc == " + elseEndNode.line + ", pc_ == " + gNode.line + ", " + elseEndNode.formula + unChanged([gNode.changed, elseEndNode.changed]))
-                    elseEndNode = None
+            # g.node(name=gNode.line, label=gNode.name)
+            
+            linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
+            linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")            
+            if len(ThenEndNodes+ElseEndNodes) == 0:
+                if len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
+                    Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
                 else:
-                    g.edge(CompoundStmtNodes[-1].ID, gNode.ID)
-                    Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + gNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([gNode.changed, CompoundStmtNodes[-1].changed]))
-            else:
-                g.edge(conditionNode.ID, gNode.ID)
-                Trans.append("pc == " + conditionNode.line + ", pc_ == " + gNode.line + ", " + conditionNode.formula + unChanged([conditionNode.changed]))
+                    g.edge(conditionNode.line, gNode.line, label="while-assign")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+            ThenEndNodes = []
+            ElseEndNodes = []
             CompoundStmtNodes.append(gNode)
-    if ifEndNode is not None:
-        g.edge(ifEndNode.ID, conditionNode.ID, label="if-while")
-        Trans.append("pc == " + ifEndNode.line + ", pc_ == " + conditionNode.line + ", " + ifEndNode.formula + unChanged([conditionNode.changed, ifEndNode.changed]))
-    if elseEndNode is not None:
-        g.edge(elseEndNode.ID, conditionNode.ID, label="else-while")
-        Trans.append("pc == " + elseEndNode.line + " pc == " + conditionNode.line + ", " + elseEndNode.formula + unChanged([conditionNode.changed, elseEndNode.changed]))
+
+        if node.kind == CursorKind.RETURN_STMT:
+            return
+        if node.kind == CursorKind.CALL_EXPR:
+            if node.spelling == "sassert":
+                gNode = parseAssertStmt(node)
+                
+                linkEndNodes2gNode(ThenEndNodes, gNode, "then-assert")
+                linkEndNodes2gNode(ElseEndNodes, gNode, "else-assert")   
+
+                if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
+                    g.edge(CompoundStmtNodes[-1].line, gNode.line, label="to-assert")
+                    Nodes[conditionNode.ID].toNodes.append(gNode.ID)
+
+                ThenEndNodes = []
+                ElseEndNodes = []
+                CompoundStmtNodes.append(gNode)
+                
+    if len(ThenEndNodes + ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0:
+        g.edge(CompoundStmtNodes[-1].line, conditionNode.line, label="while end")
+        Nodes[CompoundStmtNodes[-1].ID].toNodes.append(conditionNode.ID)
     else:
-        g.edge(CompoundStmtNodes[-1].ID, conditionNode.ID, label="while end")
-        Trans.append("pc == " + CompoundStmtNodes[-1].line + ", pc_ == " + conditionNode.line + ", " + CompoundStmtNodes[-1].formula + unChanged([conditionNode.changed, CompoundStmtNodes[-1].changed]))
-    pass
-
-def parseCondtionStmt(BinaryOperator):
-    formula, line, _t = parseOperator2Formula(BinaryOperator)
-    node = Node(name = line + ":" + formula, line = line ,formula = formula, changed = None)
-    Nodes.append(copy.deepcopy(node))
+        linkEndNodes2gNode(ThenEndNodes, conditionNode, "then-while")
+        linkEndNodes2gNode(ElseEndNodes, conditionNode, "then-while")
+################
+# Parse Node   #
+################
+# 赋值
+def parseEvaluationStmt(BinaryOperator):
+    line, formula = parseOperator2Formula(BinaryOperator)
+    node = Node(line = line, formula = formula)
+    Nodes[node.ID] = copy.deepcopy(node)
     return node
-    pass
 
+# 声明
+def parseDeclStmt(DeclStmt):
+    line, formula = parseDecl2Formula(DeclStmt)
+    node = Node(line = line, formula = formula)
+    Nodes[node.ID] = copy.deepcopy(node)
+    return node
+
+# 条件 If和While中的判断条件
+def parseCondtionStmt(BinaryOperator):
+    line, formula = parseOperator2Formula(BinaryOperator)
+    node = Node(line = line, formula = formula, isCondition = True)
+    Nodes[node.ID] = copy.deepcopy(node)
+    return node
+
+# Return 
+def getReturnNode(formula = "End", line = '0'):
+    node = Node(line = line, formula = formula, isCondition = True)
+    Nodes[int(line)] = copy.deepcopy(node)
+    return node
+
+################
+# Parse  AST   #
+################
+# x > 3
 def parseOperator2Formula(BinaryOperator):
     tokens = []
     for tk in BinaryOperator.get_tokens():
         tokens.append(tk.spelling)
-    if tokens[1] not in [">", ">=", "<", "<="]:
-        if not tokens[0].isdigit():
-            tokens[0] = tokens[0] + "_"
-        tokens[1] = "=="
-        formula = " ".join(tokens) # x = x + 1
-        line = str(BinaryOperator.location.line)
-        # return formula, line, None # 返回左值
-        return formula, line, tokens[0] # 返回左值
-    else:
-        formula = " ".join(tokens) # x < y
-        line = str(BinaryOperator.location.line)
-        return formula, line, None # 无左值
-    pass
+    line = str(BinaryOperator.location.line)
+    return line, tokens
 
+# int a = 3;
 def parseDecl2Formula(DeclStmt):
     tokens = []
     for tk in DeclStmt.get_tokens():
         tokens.append(tk.spelling)
-    formula =tokens[1] + "_" + " == " + tokens[3] # int [x = 3] ; 不要int和;
-    line = str(DeclStmt.location.line)
-
     # 声明语句 把新变量添加到变量池中
     if tokens[1] not in varsPool:
         varsPool.append(tokens[1])
-    return tokens[0], formula, line, tokens[1]  # 返回左值
-    pass
+    # 赋初值
+    if len(tokens) == 3: # int a ; 3个
+        if tokens[0] == "int" or tokens[0] == "char":
+            tokens.insert(2, "0")
+        if tokens[0] == "float" or tokens[0] == "double":
+            tokens.insert(2, "0.0")
+        tokens.insert(2, "==")
+    line = str(DeclStmt.location.line)
+    return line, tokens[1:-1]
 
-def getReturnNode(name = "End", line = 0):
-    node = Node(name = name, line = line, formula = "End", changed = None)
-    return node
-    pass
-
+# sassert(x>3)
 def parseAssertStmt(AssertStmt):
     tokens = []
     for tk in AssertStmt.get_tokens():
         tokens.append(tk.spelling)
-    formula = " ".join(tokens[2:-1])
+    
+    formula = tokens[2:-1]
     line = str(AssertStmt.location.line)
-    node = Node(name = line + ":" + formula, line = line, formula = formula, changed = None)
-    Nodes.append(node)
+    node = Node(line = line, formula = formula, isCondition = True)
+    Nodes[node.ID] = copy.deepcopy(node)
+
+    # g.node(name=node.line, label=node.name)
+
+    # 生成SAT和UNSAT结点
+    satNode = getReturnNode("SAT", '-1')
+    unsatNode = getReturnNode("UNSAT", '-2')
+    # g.node(name = satNode.line, label = satNode.name)
+    # g.node(name = unsatNode.line, label = unsatNode.name)
+    # 构建 ASSERT-SAT/UNSAT 转移
+    g.edge(node.line, satNode.line, "assert-sat")
+    g.edge(node.line, unsatNode.line, "assert-unsat")
+    Nodes[node.ID].toNodes.append(-1)
+    Nodes[node.ID].toNodes.append(-2)
     return node
     pass
 
-def parseAssumeStmt(AssumeStmt):
-    tokens = []
-    for tk in AssumeStmt.get_tokens():
-        tokens.append(tk.spelling)
-    formula = " ".join(tokens[2:-1])
-    line = str(AssumeStmt.location.line)
-    node = Node(name = line + ":" + formula, line = line, formula = formula, changed = None)
-    Nodes.append(node)
-    return node
-    pass
+ 把散乱的g.edge删除
+ 整合到for Nodes
 
 def reveredFormula(formula):
-    if "<" in formula:
-        if "=" in formula:
-            return formula.replace("<=", ">")   # <=   --- >
-        else:
-            return formula.replace("<", ">=")   # <    --- >=
-    if ">" in formula:
-        if "=" in formula:
-            return formula.replace(">=", "<")   # >=   --- <
-        else:
-            return formula.replace(">", "<=")   # >    --- <=
+    if formula[1] == "<":
+        formula[1] = ">="
+    elif formula[1] == "<=":
+        formula[1] = ">"
+    elif formula[1] == ">":
+        formula[1] = "<="
+    elif formula[1] == ">=":
+        formula[1] = "<"
+    elif formula[1] == "==":
+        formula[1] = "!="
+    elif formula[1] == "!=":
+        formula[1] = "=="
 
-def unChanged(changed):
-    f = [""]
+    return formula
+    
+def unChanged(changed = []):
+    f = []
     for var in varsPool:
         if var in changed or var + "_" in changed:
             continue
-        f.append("," + var + "_" + " == " + var)
-    return " ".join(f)
-    pass
+        f.append([var + "_", "=", var])
+    return f
+
+def linkEndNodes2gNode(EndNodes, gNode, label):
+    for EndNode in EndNodes:
+        g.edge(EndNode.line, gNode.line, label=label)
+        Nodes[EndNode.ID].toNodes.append(gNode.ID)
+    EndNodes = []
 
 # 自己定义了一个判断字符串是否为整型数字的方法；python自带的判断字符串是否为数字的方法isdigit()好像不能判断负数，
 # 比如isdigit()认为“-11”不是数字。
@@ -549,25 +590,19 @@ def isDigit(x):
         x = x[1:]
     return x.isdigit()
 
-configLibClang(libclangPath)
-AST_root_node = getRootNode(file_path)
-preorder_travers_AST(AST_root_node)
-
-# g.view()
-
-# print(varsPool)
-
 
 def InitializedCFG():
+    configLibClang(libclangPath)
+    AST_root_node = getRootNode()
+    starttime = datetime.datetime.now()
+    preorder_travers_AST(AST_root_node)
+
     # Vars and tmp predicate
     Z3AllVars = dict()
     VrasDict = dict()
-    # assume
-    AssumeList = []    
-    # AssumePreds = []  # assume 似乎不需要谓词
-    AssumeTrans = dict()
+
     # assert
-    AssertList = []
+    AssertList = [] # 文本格式
     AssertPreds = []
     AssertTrans = dict()
 
@@ -584,97 +619,44 @@ def InitializedCFG():
     for var in varsPool + ["pc"]:
         VrasDict[var] = {var + "_" : Z3AllVars[var + "_"], var : Z3AllVars[var], "_" + var : Z3AllVars["_" + var]}
     # 生成所有表达式的z3表达式
-    for index, trans in enumerate(Trans):
-        items = trans.split(",")
-        tmpList = []
-        for item in items:
-            if "==" in item:
-                tmpSplit = item.split("==")
-                left = tmpSplit[0]
-                right = tmpSplit[1]
-                if isDigit(right):
-                    right = "Int(" + right.strip() + ")" # Int(1)
-                exec('tmpList.append(Equals({left}, {right}))'.format(left=left, right=right))
-                if "pc " == left and index >= AssumeLoc:
-                    exec('AssertPreds.append(Equals({left}, {right}))'.format(left=left, right=right))
-            if "<=" in item:    # LE
-                tmpSplit = item.split("<=")
-                left = tmpSplit[0]
-                right = tmpSplit[1]
-                if utilities.isDigit(right):
-                    right = "Int(" + right.strip() + ")" # Int(1)
-                exec('tmpList.append(LE({left}, {right}))'.format(left=left, right=right))
-            elif "<" in item: #   LT
-                tmpSplit = item.split("<")
-                left = tmpSplit[0]
-                right = tmpSplit[1]
-                if isDigit(right):
-                    right = "Int(" + right.strip() + ")" # Int(1)
-                exec('tmpList.append(LT({left}, {right}))'.format(left=left, right=right))
-            if ">=" in item:    # GE
-                tmpSplit = item.split(">=")
-                left = tmpSplit[0]
-                right = tmpSplit[1]
-                if isDigit(right):
-                    right = "Int(" + right.strip() + ")" # Int(1)
-                exec('tmpList.append(GE({left}, {right}))'.format(left=left, right=right))
-            elif ">" in item:     # GT
-                tmpSplit = item.split(">")
-                left = tmpSplit[0]
-                right = tmpSplit[1]
-                if isDigit(right):
-                    right = "Int(" + right.strip() + ")" # Int(1)
-                exec('tmpList.append(GT({left}, {right}))'.format(left=left, right=right))
-        if index < AssumeLoc:
-            AssumeList.append(tmpList)
-            # AssumePreds.append(p)
-            AssertList.append(tmpList)
-        else:
-            AssertList.append(tmpList)
-    
-    # AssumePreds = list(set(AssumePreds)) # 位置谓词去重
-    AssertPreds = list(set(AssertPreds)) # 位置谓词去重
-    AssertPreds = AssertPreds + [Equals(pc, Int(-1)), Equals(pc, Int(-2))] # 位置谓词还要添加UNSAT(-1)和SAT(-2)位置 
-    # 使用zip函数转化成字典形式
-    AssumeTrans = dict(zip(list(range(len(AssumeList))), AssumeList))
-    AssertTrans = dict(zip(list(range(AssumeLoc, len(AssertList))), AssertList[AssumeLoc:]))
-    # assume last phi
-    First_trans = AssumeTrans[0]
-    Assume_init = [First_trans[0], First_trans[2]]  # assume init
-    First_trans = AssertTrans[len(AssumeTrans)]
-    Assume_verify = [First_trans[0], First_trans[2]]    # assume verify
+    for ID, node in Nodes.items():
+        g.node(name=node.line, label=node.name)
+        for index, toID in enumerate(node.toNodes):
+            toNode = Nodes[toID]
+            if index > 0:
+                transiton = Transiton(node,toNode, revered=True)
+            else:
+                transiton = Transiton(node,toNode)
+            Trans.append(transiton)
+        
+    AssertPreds = [Equals(Z3AllVars["pc"], Int(int(node.line))) for ID, node in Nodes.items()]
+    AssertTrans = dict(zip(list(range(len(Trans))), Trans))
     # assert init phi and err phi
-    Assert_init = [First_trans[0], First_trans[2]]      # assert init
-
-    Last_trans = AssertTrans[len(AssertTrans) - 1 + len(AssumeTrans)]
-    Assert_err = [Equals(pc, Int(-2)), Last_trans[2]]      # assert err
+    Assert_init = [Equals(Z3AllVars["pc"], Int(int(Nodes[0].line)))]      # assert init
+    err = [trans.z3Formula for trans in Trans if trans.toNode.line == "-2"][0]
+    Assert_err = [Equals(pc, Int(-2)) , err[0]]     # assert err
 
     print("Initialized CFG!")
+    print("Vars' Count:\t", len(VrasDict), "\tTransitions Count:\t", len(Trans))
     print("All Vars and Vars' dict form")
-    print(Z3AllVars)
     print(VrasDict)
-    print("Assume Trans")
-    for t in AssumeTrans.items():
-        print(t)
-    print("Assert Trans")
-    for t in AssertTrans.items():
-        print(t)
+    print("ALL Nodes")
+    for id, node in Nodes.items():
+        print("id:",id,node.toNodes,"\tline:", node.line)
+    print("ALL Trans")
+    for id, trans in AssertTrans.items():
+        print(id, " From:", trans.fromNode.line," To:", trans.toNode.line," formula:", trans.z3Formula)
     print("Assert Preds")
     print(AssertPreds)
     print("Assert_init")
     print(Assert_init)
     print("Assert_err")
     print(Assert_err)
-    print("Assume_init")
-    print(Assume_init)
-    print("Assume_verify")
-    print(Assume_verify)
 
-    return VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err, AssumeTrans, Assume_init, Assume_verify
+    endtime = datetime.datetime.now()
+    print("ParseT:\t", endtime - starttime)
+    return VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err
 
-# VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err, AssumeTrans, Assume_init, Assume_verify= InitializedCFG()
-# print(Vras)
-# print(AssertPreds)
-# print(AssertTrans)
-# print(Phi_init)
-# print(Phi_err)
+VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err= InitializedCFG()
+
+g.view(filename=filename[0:-2] + '.gv', directory=r'./CFA')

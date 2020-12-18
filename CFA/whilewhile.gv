@@ -1,0 +1,23 @@
+// comment
+digraph CFA {
+	0 [label="5:a_==4"]
+	3 [label="10:a_ == 5"]
+	2 -> 3
+	3 -> 2 [label="while end"]
+	2 [label="8:a > 4"]
+	1 -> 2 [label="if-while"]
+	2 -> 1 [label="while end"]
+	1 [label="6:a > 4"]
+	0 -> 1 [label="assign-while"]
+	5 [label="15:a_ == 5"]
+	4 -> 5
+	5 -> 4 [label="while end"]
+	4 [label="13:a > 4"]
+	1 -> 4 [label="assign-while"]
+	6 [label="17:a == a"]
+	4 -> 6 [label="to-assert"]
+	7 [label=SAT]
+	8 [label=UNSAT]
+	6 -> 7 [label="assert-sat"]
+	6 -> 8 [label="assert-unsat"]
+}

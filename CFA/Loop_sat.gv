@@ -1,0 +1,20 @@
+// comment
+digraph CFA {
+	6 -> 7 [label=""]
+	7 -> 8 [label=""]
+	9 -> 11 [label="while-assign"]
+	11 -> 9 [label="while end"]
+	9 [label="9:x<y"]
+	8 -> 9 [label="assign-while"]
+	13 -> -1 [label="assert-sat"]
+	13 -> -2 [label="assert-unsat"]
+	9 -> 13 [label="to-assert"]
+	6 [label="6:x=1"]
+	7 [label="7:y=2"]
+	8 [label="8:z=0"]
+	9 [label="9:x<y"]
+	11 [label="11:x=x+1"]
+	13 [label="13:x>=z"]
+	-1 [label="-1:SAT"]
+	-2 [label="-2:UNSAT"]
+}

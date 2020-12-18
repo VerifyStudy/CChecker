@@ -1,0 +1,10 @@
+// comment
+digraph CFA {
+	0 [label="6:i_==0"]
+	1 [label="7:x_==0"]
+	0 -> 1
+	2 [label="8:y_==0"]
+	1 -> 2
+	3 [label="10:x_ == 6"]
+	2 -> 3
+}

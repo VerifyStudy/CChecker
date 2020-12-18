@@ -1,57 +1,52 @@
 # -*- coding: utf-8 -*-
-from z3 import *
 import copy
-from utilities1 import *
-#variables
-_x,x,x_,_y,y,y_,_z,z,z_,_pc,pc,pc_=Ints('_x x x_ _y y y_ _z z z_ _pc pc pc_')
-V = [Ints('_x x x_ _y y y_ _z z z_ _pc pc pc_')]
-#transaction
-Trans = {1: [pc == 1, pc_ == 2, y >= z,     x == x_,     y == y_, z == z_],
-         2: [pc == 2, pc_ == 3, x < y,      x == x_,     y == y_, z == z_],
-         3: [pc == 3, pc_ == 2, x_ == x + 1,y == y_, z == z_],
-         3: [pc == 2, pc_ == 4, x >= y,     x == x_,     y == y_, z == z_],
-         4: [pc == 4, pc_ == 5, x >= z,     x == x_,     y == y_, z == z_],
-         5: [pc == 4, pc_ == 6, x + 1 <= z, x == x_,     y == y_, z == z_]
-        }
-#predicates
-Preds = [pc == 1, pc == 2, pc == 3, pc == 4, pc == 5, pc == 6]
-#all variables
-ALL_VARS=["_x","x","x_","y","_y","y_","z","z_","_z","pc","pc_","_pc"]
-ERROR   = pc == 6
-INIT    = [pc == 1]
-Phi_init = [pc == 1]
-Phi_err = [pc == 6, x < z]
-sub1 = [(x,x_),(y,y_),(z,z_),(pc,pc_)]
-sub2 = [(x_, _x), (y_, _y), (z_, _z),(pc_, _pc)]
-sub3 = [(x, _x), (y, _y), (z, _z),(pc, _pc)]
-sub4 = [(x_,x),(y_,y),(z_,z),(pc_,pc)]  # [V/V']
-# variables in p1 is eq to variables in p2
-def eqVariables(p1, p2):
-    vars1 = getVars(p1)
-    vars2 = getVars(p2)
-    if [set(vars1)] == [set(vars2)]:
-        return True
-    else:
-        return False
+import datetime
+from z3 import *
 
-# True 表示有交集 False 表示没有交集
-def isIntersection(phi1, phi2):
-    s = Solver()
-    s.add(And(phi1 + phi2))
-    if s.check() == z3.sat:
-        return True
-    else:
-        return False
+import ParseAST
 
+from utilities import *
+
+# Preds 全局变量
+VarsDict, ALL_VARS, Preds, Trans, Phi_init, Phi_err = ParseAST.InitializedCFG()
+TrueConstant = TRUE()
+FalseConstant = FALSE()
+starttime = None
+endtime = None
+
+
+# subtitute pairs
+sub1 = getSubtiPairList(VarsDict, "var", "var_")    # [V'/V]    inter
+sub2 = getSubtiPairList(VarsDict, "var_", "_var")   # [V"/V']   connect1
+sub3 = getSubtiPairList(VarsDict, "var", "_var")    # [V"/V]    post1 connect2
+sub4 = getSubtiPairList(VarsDict, "var_", "var")    # [V/V']    post2
+
+'''
+print("Sub Pairs")
+print("[V'/V]", end=" ")
+print(sub1)      # [V'/V]
+print("[V\"/V']", end=" ")
+print(sub2)      # [V"/V']
+print("[V\"/V]", end=" ")
+print(sub3)      # [V"/V]
+print("[V/V']", end=" ")
+print(sub4)      # [V/V']
+'''
 ########################
 ##     Termination    ##
 ########################
 
 # relational composition ρ o ρ
 def connect_trans(rho1, rho2):
+    if FalseConstant in rho1 + rho2:
+        print("Error! False in formula rho1 or rho2")
+        print("program is correct")
+        endtime = datetime.datetime.now()
+        print("VerifyT:\t",endtime - starttime)
+        sys.exit(0)
 
-    # rho如果不是连着的，就不能最ρ连接
-    pcSet = [p.arg(1) for p in rho1 + rho2 if p.arg(0) == pc or p.arg(0) == pc_]
+    # rho如果不是连着的，就不能进行ρ连接，返回[False]
+    pcSet = [p.arg(1) for p in rho1 + rho2 if p.arg(0) == ALL_VARS["pc"] or p.arg(0) == ALL_VARS["pc_"]]
     if len(list(set(pcSet))) != 3:
         print("Error linking problem in pc and pc_ of rho1 and rho2")
         print("rho1:", rho1)
@@ -59,14 +54,19 @@ def connect_trans(rho1, rho2):
         sys.exit(0)
 
     # substitute variables
-    rho1 = [z3.substitute(p, sub2) for p in rho1]   # [V"/V']
-    rho2 = [z3.substitute(p, sub3) for p in rho2]   # [V"/V]
+    rho1 = [substitute(p, sub2) for p in rho1]  # [V"/V']
+    rho2 = [substitute(p, sub3) for p in rho2]  # [V"/V]
  
     rho1=list(set(rho1+rho2))
-    for VName in ALL_VARS:
+    for VName, VZ3 in ALL_VARS.items():
         if VName.startswith("_"):
-            eliminate_one(eval(VName), rho1)
-
+            eliminate_one(VZ3, rho1)
+    if FalseConstant in rho1:
+        print("False in result of rho1 o rho2")
+        print("program is correct")
+        endtime = datetime.datetime.now()
+        print("VerifyT:\t",endtime - starttime)
+        sys.exit(0)
     return rho1
 
 ########################
@@ -74,26 +74,38 @@ def connect_trans(rho1, rho2):
 ########################
 
 # post condition Function
-def post(phi,rho):
+def post(phi, rho):
     if phi is None:
         print("Error upon post's return is None")
         sys.exit(0)
 
+    # post 函数只做变量替换和表达式合并
+    # 如果 phi中有True 就做直接转换
+    if TrueConstant in phi:
+        rho = [substitute(p, sub3) for p in rho]    # [V"/V]
+        rho = [substitute(p, sub4) for p in rho]    # [V/V']        
+       
+        for VName, VZ3 in ALL_VARS.items():
+            if "_" in VName:
+                eliminate_one(VZ3, rho)
+        return rho
+    # 如果有False就返回Phi 
+    if FalseConstant in phi:
+        return phi
+
     # phi只能沿着该状态的可能出发路线移动
     # 如果点和边不对应就返回None
-    pcSet = [p.arg(1) for p in phi + rho if p.arg(0) == pc]
+    pcSet = [str(p.arg(1)) for p in phi + rho if p.arg(0) == ALL_VARS["pc"]]
     if len(list(set(pcSet))) > 1:
         return None
-
-    phi = [z3.substitute(p, sub3) for p in phi]    # [V"/V]
-    rho = [z3.substitute(p, sub3) for p in rho]    # [V"/V]
-    rho = [z3.substitute(p, sub4) for p in rho]    # [V/V']
+    phi = [substitute(p, sub3) for p in phi]    # [V"/V]
+    rho = [substitute(p, sub3) for p in rho]    # [V"/V]
+    rho = [substitute(p, sub4) for p in rho]    # [V/V']
 
     phi=list(set(phi + rho))
-    for VName in ALL_VARS:
+    for VName, VZ3 in ALL_VARS.items():
         if "_" in VName:
-            eliminate_one(eval(VName), phi)
-
+            eliminate_one(VZ3, phi)
     return phi
 
 # α function
@@ -102,17 +114,16 @@ def alpha(phi):
         return None
         
     result = []
-    
+
     for p in Preds: # This is an error !!!
         if entailed(And(phi), p):
             result.append(p)
+    # 这里感觉一定会有一个结果
     if len(result) == 0:
         return [False]
-
     return result
 
-
-# post# post condition supset
+# post condition supset
 def postSharp(phi, rho):
     return alpha(post(phi, rho))
 # postSharp(phi3, rho4)
@@ -126,26 +137,25 @@ def AbstReach():
     while len(WorkList) > 0:
         phi = WorkList[-1] # choose the last one from WorkList
         del WorkList[-1]
-        for Id, rho in Trans.items():
-            print("phi", phi, "rho", rho)
-            phi_ = postSharp(phi, rho)
+        for Id, trans in Trans.items():
+            phi_ = postSharp(phi, trans)
             if phi_ is None:
                 continue
-            print("phi_", phi_)
+            # print("phi_", phi_)
             flag = True
+
             for ReachState in ReachStates:
                 if entailed(And(phi_), And(ReachState)):
                     flag = False
                     break
-            
-            if flag: # If phi' |!= V ReachStates is True
+                
+            if flag: # phi_ 对于ReachStates中所有的State 都不能蕴含
                 ReachStates.append(phi_)
                 Parent.append([phi, Id, phi_])
                 WorkList.append(phi_)
 
     return ReachStates, Parent
 
-# 从Root到Phi的路径
 def MakePath(Phi, Parent):
     Parent = copy.deepcopy(Parent)
     phi_ = copy.deepcopy(Phi)
@@ -154,7 +164,6 @@ def MakePath(Phi, Parent):
     findEnd = False # 表示没有找完，没有找到根结点
 
     # 没有找到就停止，每次找之前都假定已经找到了
-
     while not findEnd:
         findEnd = True
         for index, parent in enumerate(Parent):
@@ -167,114 +176,95 @@ def MakePath(Phi, Parent):
     pass
 
 # Feasible Path Function
-def FeasiblePath(counterExamplePath):
-    tmpPhi = copy.copy(Phi_init)
+def FeasiblePath(Phi_init, counterExamplePath):
+    tmpPhi = copy.copy(Phi_init)    #备份Phi_int
     for path in counterExamplePath:
-        tmpPhi = post(tmpPhi,Trans[path])
-    return isIntersection(tmpPhi, Phi_err)
+        tmpPhi = post(tmpPhi,Trans[path].z3Formula)
+    res = is_sat(And(tmpPhi + Phi_err), solver_name="z3")
+    return res
     
 # Refine Path Function
-def RefinePath(counterExamplePath,):
-    return inter(len(counterExamplePath), counterExamplePath)
-    # return LeastSolution(phi_init, counterExamplePath, Trans)
+def RefinePath(counterExamplePath, phi_init, phi_err):
+    Phi_err = [substitute(p, sub1) for p in phi_err]    # [V'/V]
+    Result = []
+    for i in range(len(counterExamplePath)):
+        if i == 0:
+            phi1 = copy.copy(phi_init)
+        else:
+            phi1 = post([inter], Trans[counterExamplePath[i - 1]].z3Formula)
+        
+        phi2 = copy.copy(Trans[counterExamplePath[i]].z3Formula)
+        for j in range(1, len(counterExamplePath) - i):
+            phi2 = connect_trans(phi2, Trans[counterExamplePath[j + i]].z3Formula)
+        phi2 += Phi_err
+        phi2 = list(set(phi2))
+        for VName, VZ3 in ALL_VARS.items():
+            if "_" in VName:
+                eliminate_one(VZ3, phi2)
+        inter = craigInterpolant(phi1, phi2)
+        print(inter)
+        if inter.is_true():
+            pass
+        else:
+            Result.append(inter)
+    return Result
 
 # Computing Least Solution for refining predicates
-def LeastSolution(phi_init, counterExamplePath, Trans):
+def LeastSolution(phi_init, counterExamplePath):
     phiResult = []
     for path in counterExamplePath:
-        tmp = post(phi_init, Trans[path])
+        tmp = post(phi_init, Trans[path].z3Formula)
         phiResult = phiResult + tmp
     return phiResult
     pass
 
-# inter Function for refining predicates
-# return refined predicates [True, x > z, y > z, False]
-def inter(cut, path, Result = []):
-    if cut > len(path) or cut < 0:
-        print("Error in inter")
-        return
-    if cut==len(path):
-        phi2 = [z3.substitute(ERROR, sub1)]
-    else:
-        phi2 = Trans[path[cut]]
-        for i in range(cut+1,len(path)):
-            phi2=connect_trans(phi2, Trans[path[i]])
-        if False in phi2:
-            # Result.append(True)
-            return [True]
-        phi2.append(z3.substitute(ERROR, sub1))
-    
-    if cut==0:
-        phi1=INIT
-    else:
-        phi1=post(inter(cut-1, path, Result),Trans[path[cut-1]])
-        if False in phi1:
-            Result.append(False)
-            return Result
-    phi1=list(set(phi1))
-    phi2=list(set(phi2))
-    for VName in ALL_VARS:
-          if "_" in VName:
-              eliminate_one(eval(VName), phi1)
-              eliminate_one(eval(VName), phi2)
-
-    v1 = [v for p in phi1 for v in get_vars(p)]
-    v1=list(set(v1))
-    v2 = [v for p in phi2 for v in get_vars(p)]
-    v2=list(set(v2))
-    for a in v1:
-        if a not in v2:
-            eliminate_one(a, phi1)
-    s=z3.Solver()
-    s.add(phi2)
-    for a in phi1:
-        if a in phi2:
-            continue
-        s.add(a)
-        if s.check() == z3.unsat:
-            Preds.append(a)
-            s.reset()
-            print(a)
-            Result.append(a)
-            return [a]
-        s.pop()
-
-    return Result
+def craigInterpolant(formulaA, formulaB):
+    # 插值计算时候，去掉pc
+    itp = Interpolator(name="msat")
+    print("phi1 = ", end="")
+    print(formulaA)
+    print("phi2 = ", end="")
+    print(formulaB)
+    formulaANoPc = [formula for formula in formulaA if formula.arg(0) != ALL_VARS["pc"]]
+    formulaBNoPc = [formula for formula in formulaB if formula.arg(0) != ALL_VARS["pc"]]
+    inter = itp.binary_interpolant(And(formulaANoPc), And(formulaBNoPc))
+    return inter
 
 # AbstRefindLoop Function
 def AbstRefineLoop():
-    
+
     while True:
         flag = False
         ReachStates, Parent = AbstReach()
         print("[ReachStates]", ReachStates)
         for Phi in ReachStates:
-            if not isIntersection(Phi, Phi_err):
+            res = is_sat(And(Phi + Phi_err), solver_name="z3")
+            if not res:
                 continue
             flag = True
             counterExamplePath = MakePath(Phi, Parent)
 
             # 如果反例路径得到结果和phi_err有交集，就输出反例路径
-            if FeasiblePath(counterExamplePath):
+            if FeasiblePath(Phi_init, counterExamplePath):
                 print("counter-example path:", counterExamplePath)
                 return counterExamplePath
             else:
                 print("counterExamplePath:", counterExamplePath)
                 print("refining..")
-                newPradicate = RefinePath(counterExamplePath)
+                newPradicate = RefinePath(counterExamplePath, Phi_init, Phi_err)
                 for np in newPradicate:
                     if np in Preds:
                         continue
                     else:
                         Preds.append(np)
                 continue
-            break
 
         print("[Preds]", Preds)
         if not flag:
             return "program is correct"
     pass
 
+starttime = datetime.datetime.now()
 print(AbstRefineLoop())
-        
-
+endtime = datetime.datetime.now()
+print("VerifyT:\t",endtime - starttime)
