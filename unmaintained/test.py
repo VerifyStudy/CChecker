@@ -9,6 +9,7 @@ from pysmt.shortcuts import *
 from pysmt.typing import REAL, INT
 from pysmt.fnode import FNode
 from pysmt.operators import *
+import copy
 
 x, y, z = Symbol("x", INT), Symbol("y", INT), Symbol("z", INT)
 m, n = Symbol("n", INT), Symbol("n", INT)
@@ -82,4 +83,7 @@ def func(var, formula):
 # print(func(x, Equals(x-y,z)))
 # print(func(y, Equals(x+y,z)))
 # print(func(y, Equals(x-y,z)))
-print(func(y, Equals(x-y,z + Int(1))))
+f1 = Equals(x,y)
+f2 = copy.deepcopy(f1)
+print(f2.substitute({y:z}))
+print(f1.substitute({y:z}))

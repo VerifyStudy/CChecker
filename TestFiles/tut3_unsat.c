@@ -3,7 +3,8 @@ void sassert(X) {}
 
 void main()
 {
-	int x, y;
+	int x;
+	int y;
 	int k = 3;
 	x = 0;
 	y = 0;
@@ -18,6 +19,6 @@ void main()
 		x--;
 		y--;
 	}
-	assert(y == 0);
+	sassert(y == 0);
 	return 0;
 }

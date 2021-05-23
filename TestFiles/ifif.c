@@ -1,3 +1,24 @@
+int main()
+{
+  int x = 0;
+  int y = 0;
+  while(x < 3)
+  {
+    x = x + 1;
+    y = y + 2;
+  }
+  if (y < x)
+  {
+    y = x - y;
+  }
+  else
+  {
+    x = y - x;
+  }
+  sassert(x < y);
+}
+
+
 //Test Structure
 void sassert(X) {}
 
@@ -38,3 +59,5 @@ int main()
     sassert(a == b);
     return 0;
 }
+
+

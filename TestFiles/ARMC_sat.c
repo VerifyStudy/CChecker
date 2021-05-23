@@ -9,7 +9,7 @@ int main()
     {
         x = x + 1;
         y = y + 1;
-    }  
+    }
     sassert(x == y);
     return 0;
 }

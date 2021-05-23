@@ -6,22 +6,34 @@ from pysmt.shortcuts import *
 from pysmt.typing import INT
 
 import clang.cindex
-from clang.cindex import Index  #主要API
+from clang.cindex import Index  #主要 API
 from clang.cindex import Config  #配置
 from clang.cindex import CursorKind  #索引结点的类别
 from clang.cindex import TypeKind    #节点的语义类别
 
 libclangPath = r'./lib/libclang.dll'
-# filename = r"whileif.c"
+# filename = r"ARMC_sat.c"
 # filename = r"Branch_sat.c"
-filename = r"Loop_sat.c"
 # filename = r"Loop_sat.c"
+# filename = r"tut1_unsat.c "
+# filename = r"tut2_unsat.c"
+# filename = r"tut3_unsat.c"
+# filename = r"test1_sat.c"
+# filename = r"test1_unsat.c"
+# filename = r"test2_sat.c"
+filename = r"test2_unsat.c"
+
+
 directory = r"./TestFiles/"     # 测试文件路径
 
 AST_root_node = None # 根节点
 varsPool = []   # 初始只有位置谓词
-Trans = []      # 文本类型转化集
+Trans = dict()      # 文本类型转化集
 Nodes = dict()      # 状态集
+
+# Vars and Vars' dict
+Z3AllVars = dict()
+VrasDict = dict()
 
 g = Digraph(name='CFA', comment="comment", format='png')    # graph object
 
@@ -60,58 +72,55 @@ class Node(object):
     每个结点有名字，有唯一ID，有自己的公式，公式如果是逻辑判断，changed就是不改变。
     changed是记录变量被修改，下次转化时候方便一些
     '''
-    def __init__(self, line, formula, isCondition = False, toNodes = []):
-        self.line = str(line)
-        self.formula = formula  # []
-        self.name = self.getName()   # Label
-        self.isCondition = isCondition  # 判断是否是条件
-        self.changed = self.getChanged() # line : formula
-        self.toNodes = toNodes
-        self.ID = Node.id
+    def __init__(self, line, formula, toNodes = []):
+        self.line = line
+        self.ID = self.getID()
+        self.formula = formula          # ['x', '>', '1']
+        self.z3Formula = None
+        self.name = self.getName()      # line : formula
+        self.toNodes = toNodes          # [toNode1.ID, toNode2.ID]
+        self.changed = self.getChanged()    #???
+        self.vars = []
         Node.id += 1
     
+    def getID(self):
+        if self.line == "-2":
+            Node.id -= 1
+            return -2
+        else:
+            return Node.id
+
     def getName(self):
-        name = self.line + ":" + "".join(self.formula)
-        if self.line == "-1" or self.line == "-2":
+        name = ""
+        if self.line == "-1":
+            name = self.line + ":SAT"
             self.formula = [''] 
+        elif self.line == "-2":
+            name = self.line + ":UNSAT"
+            self.formula = reveredFormula(self.formula)
+        else:
+            name = self.line + ":" + "".join(self.formula)
         return name
 
-    def getChanged(self):
-        if self.isCondition:
-            return ''
-        else:
-            return self.formula[0]
-
-class Transiton(object):
-    id = 0
-    def __init__(self, fromNode, toNode, revered = False):
-        self.ID = str(Transiton.id)
-        self.fromNode = fromNode
-        self.toNode = toNode
-        self.revered = revered
-        self.formulas = self.getFormulas()
-        self.z3Formula = self.z3Formula()
-        Transiton.id += 1
-
-    def getFormulas(self):
-        f1 = copy.deepcopy(self.fromNode.formula)
-        f2 = unChanged([self.fromNode.changed])
-        if self.fromNode.isCondition:
-            if self.revered:
-                return [reveredFormula(f1)] + f2
-            else:
-                return [f1] + f2
-        else:
-            f1[0] = f1[0] + "_"
-            return [f1] + f2
+    # def getChanged(self):
+    #     if self.isCondition:
+    #         return ''
+    #     else:
+    #         return self.formula[0]
     
-    def z3Formula(self):
+    def initZ3Formula(self):
         z3Formula = []
-        tmpForumula = copy.deepcopy(self.formulas)
-        for formula in tmpForumula + [["pc","=",self.fromNode.line]] + [["pc_","=",self.toNode.line]]:
+        formula = copy.deepcopy(self.formula)
+        formulas = [formula] + [["pc", "=", self.line]]
+        for formula in formulas:
+            if len(formula) == 1:
+                self.z3Formula = z3Formula
+                return
             for index in range(len(formula)):
                 if isDigit(formula[index]):
                     formula[index] = "Int(" + formula[index].strip() + ")"
+                elif formula[index] not in ["=", "==", "!=", ">", ">=", "<", "<=", "+", "-"] :
+                    formula[index] = "Z3AllVars['{var}']".format(var = formula[index])
             if formula[1] == "=":
                 exec("z3Formula.append(Equals({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
             elif formula[1] == "!=":
@@ -124,8 +133,55 @@ class Transiton(object):
                 exec("z3Formula.append(GE({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
             elif formula[1] == ">":
                 exec("z3Formula.append(GT({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            
+        self.z3Formula = z3Formula
+
+class Transiton(object):
+    id = 0
+    def __init__(self, fromState, toState, revered = False):
+        self.ID = Transiton.id
+        self.fromState = fromState
+        self.toState = toState
+        self.revered = revered  # 可以删除
+        self.formulas = self.getFormulas()
+        self.z3Formulas = self.initZ3Formulas()
+        Transiton.id += 1
+
+    def getFormulas(self):
+        f1 = copy.deepcopy(self.fromState.formula)
+        f2 = unChanged([self.fromState.changed])
+        if self.fromState.isCondition:
+            if self.revered:
+                return [reveredFormula(f1)] + f2
+            else:
+                return [f1] + f2
+        else:
+            f1[0] = f1[0] + "_"
+            return [f1] + f2
+    
+    def initZ3Formulas(self):
+        formulas = copy.deepcopy(self.formulas)
+        formulas = formulas + [["pc", "=", self.fromState.line], ["pc_", "=", self.toState.line]]
+        z3Formula = []
+        for formula in formulas:
+            for index in range(len(formula)):
+                if isDigit(formula[index]):
+                    formula[index] = "Int(" + formula[index].strip() + ")"
+                elif formula[index] not in ["=", "==", "!=", ">", ">=", "<", "<=", "+" ,"-"] :
+                    formula[index] = "Z3AllVars['{var}']".format(var = formula[index])
+            if formula[1] == "=":
+                exec("z3Formula.append(Equals({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "!=":
+                exec("z3Formula.append(NotEquals({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "<=":
+                exec("z3Formula.append(LE({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == "<":
+                exec("z3Formula.append(LT({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == ">=":
+                exec("z3Formula.append(GE({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))
+            elif formula[1] == ">":
+                exec("z3Formula.append(GT({left},{right}))".format(left = formula[0], right = "".join(formula[2:])))                
         return z3Formula
-        pass
 
 def parseFunctionDecl(FunctionDecl):
     for FunctionCompound in FunctionDecl.get_children():
@@ -145,13 +201,12 @@ def traversFuncCompoundStmt(CompoundStmt):
     for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
             gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-if")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-if")
 
             if len(ThenEndNodes+ElseEndNodes) == 0 and len(CompoundStmtNodes) > 0 :
-                g.edge(CompoundStmtNodes[-1].ID, gNode.line, label="assign-if")
+                g.edge(CompoundStmtNodes[-1].line, gNode.line, label="assign-if")
                 Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
 
                 
@@ -160,7 +215,6 @@ def traversFuncCompoundStmt(CompoundStmt):
 
         if node.kind == CursorKind.WHILE_STMT:
             gNode = traversWhileStmt(node)
-            g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
@@ -175,7 +229,6 @@ def traversFuncCompoundStmt(CompoundStmt):
 
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
@@ -184,6 +237,7 @@ def traversFuncCompoundStmt(CompoundStmt):
                 if len(CompoundStmtNodes) > 0 :
                     g.edge(CompoundStmtNodes[-1].line, gNode.line, label="")
                     Nodes[CompoundStmtNodes[-1].ID].toNodes.append(gNode.ID)
+                    Nodes[CompoundStmtNodes[-1].ID].vars.append(gNode.formula[0])
 
             ThenEndNodes = []
             ElseEndNodes = []
@@ -191,7 +245,6 @@ def traversFuncCompoundStmt(CompoundStmt):
         
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")           
@@ -256,7 +309,6 @@ def traversIfCompound(CompoundStmt, conditionNode):
     for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
             gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-if")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-if")
@@ -274,7 +326,6 @@ def traversIfCompound(CompoundStmt, conditionNode):
 
         if node.kind == CursorKind.WHILE_STMT:
             gNode = traversWhileStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
@@ -293,7 +344,6 @@ def traversIfCompound(CompoundStmt, conditionNode):
 
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
@@ -312,7 +362,6 @@ def traversIfCompound(CompoundStmt, conditionNode):
         
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")            
@@ -371,7 +420,6 @@ def traversWhileBody(CompoundStmt, conditionNode):
     for node in CompoundStmt.get_children():
         if node.kind == CursorKind.IF_STMT:
             gNode, ThenEndNodes_, ElseEndNodes_ = traversIfStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
@@ -389,7 +437,6 @@ def traversWhileBody(CompoundStmt, conditionNode):
 
         if node.kind == CursorKind.WHILE_STMT:
             gNode = traversWhileStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
 
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-while")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-while")
@@ -408,7 +455,6 @@ def traversWhileBody(CompoundStmt, conditionNode):
 
         if node.kind == CursorKind.DECL_STMT:
             gNode = parseDeclStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-decl")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-decl")           
@@ -426,7 +472,6 @@ def traversWhileBody(CompoundStmt, conditionNode):
 
         if node.kind == CursorKind.BINARY_OPERATOR:
             gNode = parseEvaluationStmt(node)
-            # g.node(name=gNode.line, label=gNode.name)
             
             linkEndNodes2gNode(ThenEndNodes, gNode, "then-assign")
             linkEndNodes2gNode(ElseEndNodes, gNode, "else-assign")            
@@ -519,7 +564,7 @@ def parseDecl2Formula(DeclStmt):
             tokens.insert(2, "0")
         if tokens[0] == "float" or tokens[0] == "double":
             tokens.insert(2, "0.0")
-        tokens.insert(2, "==")
+        tokens.insert(2, "=")
     line = str(DeclStmt.location.line)
     return line, tokens[1:-1]
 
@@ -534,23 +579,18 @@ def parseAssertStmt(AssertStmt):
     node = Node(line = line, formula = formula, isCondition = True)
     Nodes[node.ID] = copy.deepcopy(node)
 
-    # g.node(name=node.line, label=node.name)
-
     # 生成SAT和UNSAT结点
-    satNode = getReturnNode("SAT", '-1')
-    unsatNode = getReturnNode("UNSAT", '-2')
-    # g.node(name = satNode.line, label = satNode.name)
-    # g.node(name = unsatNode.line, label = unsatNode.name)
+    satNode = Node(line = "-1", formula = ["SAT"], isCondition = True)
+    unsatNode = Node(line = "-2", formula = formula, isCondition = True)
+    Nodes[satNode.ID] = copy.deepcopy(satNode)
+    Nodes[unsatNode.ID] = copy.deepcopy(unsatNode)
     # 构建 ASSERT-SAT/UNSAT 转移
     g.edge(node.line, satNode.line, "assert-sat")
     g.edge(node.line, unsatNode.line, "assert-unsat")
-    Nodes[node.ID].toNodes.append(-1)
-    Nodes[node.ID].toNodes.append(-2)
+    Nodes[node.ID].toNodes.append(satNode.ID)
+    Nodes[node.ID].toNodes.append(unsatNode.ID)
     return node
     pass
-
- 把散乱的g.edge删除
- 整合到for Nodes
 
 def reveredFormula(formula):
     if formula[1] == "<":
@@ -590,16 +630,12 @@ def isDigit(x):
         x = x[1:]
     return x.isdigit()
 
-
 def InitializedCFG():
     configLibClang(libclangPath)
     AST_root_node = getRootNode()
     starttime = datetime.datetime.now()
     preorder_travers_AST(AST_root_node)
 
-    # Vars and tmp predicate
-    Z3AllVars = dict()
-    VrasDict = dict()
 
     # assert
     AssertList = [] # 文本格式
@@ -621,42 +657,42 @@ def InitializedCFG():
     # 生成所有表达式的z3表达式
     for ID, node in Nodes.items():
         g.node(name=node.line, label=node.name)
+        node.initZ3Formula()
         for index, toID in enumerate(node.toNodes):
             toNode = Nodes[toID]
             if index > 0:
                 transiton = Transiton(node,toNode, revered=True)
             else:
                 transiton = Transiton(node,toNode)
-            Trans.append(transiton)
+            AssertTrans[transiton.ID] = transiton
         
     AssertPreds = [Equals(Z3AllVars["pc"], Int(int(node.line))) for ID, node in Nodes.items()]
-    AssertTrans = dict(zip(list(range(len(Trans))), Trans))
     # assert init phi and err phi
-    Assert_init = [Equals(Z3AllVars["pc"], Int(int(Nodes[0].line)))]      # assert init
-    err = [trans.z3Formula for trans in Trans if trans.toNode.line == "-2"][0]
-    Assert_err = [Equals(pc, Int(-2)) , err[0]]     # assert err
+    # Assert_init = copy.deepcopy(Nodes[0])      # assert init
+    # Assert_err = [node for ID, node in Nodes.items() if node.line == "-2"][0] # assert err
 
     print("Initialized CFG!")
-    print("Vars' Count:\t", len(VrasDict), "\tTransitions Count:\t", len(Trans))
+    print("Vars' Count:\t", len(VrasDict), "\tTransitions Count:\t", len(AssertTrans))
     print("All Vars and Vars' dict form")
     print(VrasDict)
     print("ALL Nodes")
-    for id, node in Nodes.items():
-        print("id:",id,node.toNodes,"\tline:", node.line)
+    for ID, node in Nodes.items():
+        print("id:",ID, "line:", node.line, "formula:", node.z3Formula, " next node id:", node.toNodes)
     print("ALL Trans")
-    for id, trans in AssertTrans.items():
-        print(id, " From:", trans.fromNode.line," To:", trans.toNode.line," formula:", trans.z3Formula)
+    for ID, trans in AssertTrans.items():
+        print("id:", ID, " From:", trans.fromState.line," To:", trans.toState.line," formula:", trans.z3Formulas)
     print("Assert Preds")
     print(AssertPreds)
-    print("Assert_init")
-    print(Assert_init)
-    print("Assert_err")
-    print(Assert_err)
+    # print("Assert_init")
+    # print("line:", Assert_init.line, "\t", Assert_init.z3Formula)
+    # print("Assert_err")
+    # print("line:", Assert_init.line, "\t", Assert_err.z3Formula)
 
     endtime = datetime.datetime.now()
     print("ParseT:\t", endtime - starttime)
-    return VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err
+    return VrasDict, Z3AllVars, AssertPreds, AssertTrans, Nodes
+    # , Assert_init, Assert_err
 
-VrasDict, Z3AllVars, AssertPreds, AssertTrans, Assert_init, Assert_err= InitializedCFG()
+# VrasDict, Z3AllVars, AssertPreds, AssertTrans, Nodes = InitializedCFG()
 
-g.view(filename=filename[0:-2] + '.gv', directory=r'./CFA')
+# g.view(filename=filename[0:-2] + '.gv', directory=r'./CFA')

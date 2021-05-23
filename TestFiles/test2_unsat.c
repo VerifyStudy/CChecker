@@ -4,19 +4,24 @@ void sassert(X) {}
 int main()
 {
     int i;
-    int x, y;
+    int x;
+    int y;
     y = 7;
     x = 0;
 
     if (y == 7)
     {
         x = 5;
-        for (i = 1; i < 100000; i++)
+        i = 1;
+        while ( i < 100000)
         {
             y++;
+            i++;
         }
-        assert( x == 5);
+        sassert( x == 5);
     }
+    else
+    {}
 
     return 0;
 }

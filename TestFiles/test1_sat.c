@@ -15,5 +15,5 @@ void main()
         y++;
     }
 
-    assert (x != 6);
+    sassert (x != 6);
 }
