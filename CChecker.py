@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # system lib
+import os
+import sys
 import copy
 import time
 import datetime
@@ -288,8 +290,9 @@ def configLibClang(libclangPath):
         print("install path")
 
 # 生成AST根节点,参数是 *.c file
-def getRootNode(directory = directory, filename = filename):
+def getRootNode(filename = filename):
     index = Index.create() # 创建AST索引
+    print(directory,filename)
     tu = index.parse(directory + filename)  # tu:=TranslationUnit
     AST_root_node= tu.cursor  #cursor根节点
     if AST_root_node is not None:
@@ -734,9 +737,9 @@ def reversedFormula(formula):
 def unChanged(vars = []):
     return [[var + "_", "=", var]for var in vars]
 
-def InitializedCFG():
+def InitializedCFG(filename):
     configLibClang(libclangPath)
-    AST_root_node = getRootNode()
+    AST_root_node = getRootNode(filename)
     starttime = datetime.datetime.now()
     preorder_travers_AST(AST_root_node)
 
@@ -791,7 +794,7 @@ def InitializedCFG():
 ##      Verificator   ##
 ########################
 # Preds 全局变量
-VarsDict, ALL_VARS, Preds, TransList, StateList = InitializedCFG()
+VarsDict, ALL_VARS, Preds, TransList, StateList = InitializedCFG(sys.argv[1])
 initID  = 0
 errID   = -2
 TrueConstant = TRUE()
@@ -926,7 +929,6 @@ def alpha(phi):
 # post condition supset
 def postSharp(phi, rho):
     return alpha(post(phi, rho))
-# postSharp(phi3, rho4)
 
 # AbstractReach Function
 def AbstractReach():
@@ -1024,10 +1026,10 @@ def RefinePath(CEP):
 
 # Computing Least Solution for refining predicates
 def LeastSolution(CEP):
-    tmpPhi = State_init.z3Formula    #备份Phi_int
+    tmpPhi = StateList[initID].z3Formula    #备份Phi_int
     StateResult = []
     for rhoId in CEP:
-        tmpState = post(State_init, TransList[rhoId].z3Formula)
+        tmpState = post(StateList[initID], TransList[rhoId].z3Formula)
         StateResult.append(tmpState)
     return StateResult
 
@@ -1090,7 +1092,7 @@ def AbstRefineLoop():
             print("Preds Count:", len(Preds))
             print("program is correct")
             return 
-    pass
+
 
 starttime = datetime.datetime.now()
 with eventlet.Timeout(3, False):
